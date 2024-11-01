@@ -1,0 +1,569 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# Load Libraries
+```{r}
+# Load necessary libraries
+library(tidyverse)   # For data manipulation and visualization (includes dplyr and ggplot2)
+library(dplyr)
+library(lubridate)   # For date-time manipulation
+library(readxl)      # For reading Excel files
+library(naniar)
+library(stringr)
+```
+# Data Preparation and Cleaning
+```{r}
+# Read data from Excel sheets into separate data frames
+file_path <- "StatIIInterviewDataset_Aug 2024.xlsx"  # Path to the Excel file
+incident_times <- read_xlsx(file_path, sheet = "Incident Times")  # Read "Incident Times" sheet
+cardiac_arrest <- read_xlsx(file_path, sheet = "Cardiac Arrest")  # Read "Cardiac Arrest" sheet
+vitals <- read_xlsx(file_path, sheet = "Vitals")  # Read "Vitals" sheet
+patient <- read_xlsx(file_path, sheet = "Patient")  # Read "Patient" sheet
+response <- read_xlsx(file_path, sheet = "Response")  # Read "Response" sheet
+
+# Print column names for each data frame to check the structure
+colnames(incident_times)  # Column names of incident_times
+colnames(cardiac_arrest)  # Column names of cardiac_arrest
+colnames(vitals)          # Column names of vitals
+colnames(patient)         # Column names of patient
+colnames(response)        # Column names of response
+
+# Print structure of each data frame to understand the data types and structure
+str(incident_times)
+str(cardiac_arrest)
+str(vitals)
+str(patient) 
+str(response)
+```
+## Consistency checks
+```{r}
+# Use gsub to remove newline characters from column names
+# This makes column names cleaner and easier to work with
+colnames(incident_times) <- gsub("\r\n", " ", colnames(incident_times))
+colnames(cardiac_arrest) <- gsub("\r\n", " ", colnames(cardiac_arrest))
+colnames(vitals) <- gsub("\r\n", " ", colnames(vitals))
+colnames(patient) <- gsub("\r\n", " ", colnames(patient))
+colnames(response) <- gsub("\r\n", " ", colnames(response))
+
+# Print column names again to check changes
+colnames(incident_times)
+colnames(cardiac_arrest)
+colnames(vitals)
+colnames(patient)
+colnames(response)
+```
+## Date-Time as POSIXct
+```{r}
+# Convert Excel serial date-time to R Date-Time
+# Function to convert Excel serial date-time numbers to POSIXct date-time objects
+convert_excel_datetime <- function(serial_date) {
+  # Base date for Excel
+  base_date <- as.POSIXct("1899-12-30", tz = "UTC") # Excel base date
+  
+  # Convert serial date to POSIXct
+  posix_datetime <- base_date + as.numeric(serial_date) * 86400 # 86400 seconds in a day
+  
+  return(posix_datetime)
+}
+
+# Example value to demonstrate conversion
+serial_date <- 44592.508437500001  # Example Excel serial date-time number
+converted_datetime <- convert_excel_datetime(serial_date)  # Convert to POSIXct
+print(converted_datetime)  # Print converted date-time
+```
+
+## Identify missing data
+```{r}
+# Check for missing values in each dataset
+# This helps to identify any data completeness issues
+sapply(list(incident_times, cardiac_arrest, vitals, patient, response), function(x) sum(is.na(x)))
+```
+## Update Column Data Types
+```{r}
+# Update all eTimes variables using the conversion function
+# Apply convert_excel_datetime to all columns containing "eTimes" in their names
+vitals <- vitals %>%
+  mutate(across(contains("eTimes"), ~ convert_excel_datetime(.x)))
+
+# Specifically update the "Vitals Signs Take Date Time (eVitals.01)" column
+vitals <- vitals %>%
+  mutate(`Vitals Signs Take Date Time (eVitals.01)` = convert_excel_datetime(`Vitals Signs Take Date Time (eVitals.01)`))
+```
+
+## Aggregate Vitals Data
+```{r}
+# Ensure numeric fields are properly formatted
+# Convert columns containing "eVitals" to numeric type
+vitals <- vitals %>%
+  mutate(
+    across(
+      c(
+        'Vitals Systolic Blood Pressure SBP (eVitals.06)', 
+        'Vitals Heart Rate (eVitals.10)', 
+        'Vitals Respiratory Rate (eVitals.14)'
+      ), 
+      as.numeric  # Convert specified columns to numeric
+    )
+  )
+
+# Assuming `vitals_data` is your dataframe containing the vital signs
+
+aggregated_vitals <- vitals %>%
+  group_by(`Patient Care Report Number - PCR (eRecord.01)`) %>%
+  summarise(across(contains("eVitals") & !contains("eVitals.01"), 
+                   list(mean = ~ mean(.x, na.rm = TRUE),
+                        min = ~ min(.x, na.rm = TRUE),
+                        max = ~ max(.x, na.rm = TRUE))), 
+            .groups = "drop",
+            `Vitals Signs Take Date Time (eVitals.01)` = first(`Vitals Signs Take Date Time (eVitals.01)`))
+
+```
+
+# Joining the Tables
+```{r}
+# Joining tables on PCR number to create a combined dataset
+# Each table is joined based on the common column "Patient Care Report Number - PCR (eRecord.01)"
+data <- incident_times %>%
+    left_join(cardiac_arrest, by = c("Patient Care Report Number - PCR (eRecord.01)" = "Patient Care Report Number - PCR (eRecord.01)")) %>%
+    left_join(aggregated_vitals, by = c("Patient Care Report Number - PCR (eRecord.01)" = "Patient Care Report Number - PCR (eRecord.01)")) %>%
+    left_join(patient, by = c("Patient Care Report Number - PCR (eRecord.01)" = "Patient Care Report Number - PCR (eRecord.01)")) %>%
+    left_join(response, by = c("Patient Care Report Number - PCR (eRecord.01)" = "Patient Care Report Number - PCR (eRecord.01)"))
+```
+
+```{r}
+# Update all eTimes variables using the conversion function
+# Apply convert_excel_datetime to all columns containing "eTimes" in their names
+data <- data %>%
+  mutate(across(contains("eTimes"), ~ convert_excel_datetime(.x)))
+
+# Specifically update the "Vitals Signs Take Date Time (eVitals.01)" column
+data <- data %>%
+  mutate(`Vitals Signs Take Date Time (eVitals.01)` = convert_excel_datetime(`Vitals Signs Take Date Time (eVitals.01)`))
+```
+
+## Identify duplicates
+```{r}
+combined_data <- data
+# Check for duplicate PCR numbers across all datasets
+duplicate_pcr <- combined_data %>%
+  group_by(`Patient Care Report Number - PCR (eRecord.01)`) %>%
+  filter(n() > 1) %>%
+  summarise(Count = n())
+
+# View duplicate PCR numbers
+print(duplicate_pcr)
+```
+## Create Age Variable
+```{r}
+# Combine age variables into a single age variable in years
+# Ensure age and units columns are treated as characters for easier handling
+combined_data <- combined_data %>%
+  mutate(
+    `Patient Age (ePatient.15)` = as.numeric(`Patient Age (ePatient.15)`),
+    `Patient Age Units (ePatient.16)` = as.character(`Patient Age Units (ePatient.16)`)
+  )
+
+# Define the function to convert age to years
+convert_age_to_years <- function(age, units) {
+  # Handle missing values
+  if (is.na(age) || is.na(units)) {
+    return(NA)
+  }
+  
+  # Convert units to lower case for consistency
+  units <- tolower(units)
+  
+  # Convert age based on units
+  if (units == "months") {
+    return(age / 12)  # Convert months to years
+  } else if (units == "days") {
+    return(age / 365.25)  # Convert days to years (approximate)
+  } else if (units == "years") {
+    return(age)  # Already in years
+  } else {
+    # Print a message if an unknown unit is encountered
+    warning(paste("Unknown age unit:", units))
+    return(NA)
+  }
+}
+
+# Apply the conversion function to each row
+combined_data <- combined_data %>%
+  mutate(
+    Patient_Age_Years = mapply(convert_age_to_years, `Patient Age (ePatient.15)`, `Patient Age Units (ePatient.16)`)
+  )
+
+# Check the result
+head(combined_data %>% select(`Patient Age (ePatient.15)`, `Patient Age Units (ePatient.16)`, Patient_Age_Years))
+```
+
+# Missing Data
+## Visualize Missing Data
+```{r}
+# Visualize missing data patterns
+gg_miss_var(combined_data)  # Visualize missing data by variable
+```
+
+## Summarize Missing Data
+```{r}
+# Summarize missing data
+summary(combined_data)
+
+# Proportion of missing data per column
+sapply(combined_data, function(x) mean(is.na(x)))
+```
+
+# Detecting Outliers
+## Using Boxplots
+```{r}
+# Visualize outliers for vital signs
+combined_data %>%
+  select(
+    `Vitals Systolic Blood Pressure SBP (eVitals.06)_mean`,
+    `Vitals Heart Rate (eVitals.10)_mean`,
+    `Vitals Respiratory Rate (eVitals.14)_mean`
+  ) %>%
+  gather(key = "variable", value = "value") %>%
+  mutate(variable = str_replace_all(variable, c("_mean$" = "", "\\s*\\(eVitals\\.\\d{2}\\)" = ""))) %>%  # Remove "_mean" and "(eVitals.xx)"
+  ggplot(aes(x = variable, y = value)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Boxplot for Vital Signs to Detect Outliers", x = "Variable", y = "Value")
+
+```
+
+# Who is impacted?
+## Age
+```{r}
+# Create age bins and categorize each age
+combined_data <- combined_data %>%
+  mutate(
+    Age_Group = case_when(
+      Patient_Age_Years < 18 ~ "Younger than 18",
+      Patient_Age_Years >= 18 & Patient_Age_Years <= 24 ~ "18–24",
+      Patient_Age_Years >= 25 & Patient_Age_Years <= 44 ~ "25–44",
+      Patient_Age_Years >= 45 & Patient_Age_Years <= 64 ~ "45–64",
+      Patient_Age_Years >= 65 & Patient_Age_Years <= 74 ~ "65–74",
+      Patient_Age_Years >= 75 ~ "75 and older",
+      TRUE ~ NA_character_  # Handle any NA values
+    )
+  )
+
+age_summary <- combined_data %>%
+  group_by(Age_Group) %>%
+  filter(`Cardiac Arrest During EMS Event (eArrest.01)` %in% c(
+    "Yes, Prior to Any EMS Arrival\r\n(includes Transport EMS &\r\nMedical First Responders)",
+    "Yes, After Any EMS Arrival\r\n(includes Transport EMS &\r\nMedical First Responders)"
+  )) %>%
+  summarise(
+    count = n()
+  ) %>%
+  arrange(desc(count))
+
+# Print age summary
+print(age_summary)
+```
+## Gender
+```{r}
+# Summarize data by Gender
+gender_summary <- combined_data %>%
+  group_by(`Patient Gender (ePatient.13)`) %>%
+  filter(`Cardiac Arrest During EMS Event (eArrest.01)` %in% c(
+    "Yes, Prior to Any EMS Arrival\r\n(includes Transport EMS &\r\nMedical First Responders)",
+    "Yes, After Any EMS Arrival\r\n(includes Transport EMS &\r\nMedical First Responders)"
+  )) %>%
+  summarise(
+    count = n()
+  ) %>%
+  arrange(desc(count))
+
+# Print gender summary
+print(gender_summary)
+```
+
+## Race/Ethnicity
+```{r}
+# Summarize data by Race/Ethnicity
+race_summary <- combined_data %>%
+  group_by(`Patient Race LIST (ePatient.14)`) %>%
+  filter(`Cardiac Arrest During EMS Event (eArrest.01)` %in% c(
+    "Yes, Prior to Any EMS Arrival\r\n(includes Transport EMS &\r\nMedical First Responders)",
+    "Yes, After Any EMS Arrival\r\n(includes Transport EMS &\r\nMedical First Responders)"
+  )) %>%
+  summarise(
+    count = n()
+  ) %>%
+  arrange(desc(count))
+
+# Print race/ethnicity summary
+print(race_summary)
+```
+
+
+```{r}
+# Define a function to clean and standardize race/ethnicity categories
+clean_race_categories <- function(race) {
+  race <- tolower(race)  # Convert to lowercase for consistency
+  
+  # Define broad categories
+  if (grepl("white", race)) {
+    if (grepl("black", race)) {
+      return("White and Black or African American")
+    } else if (grepl("hispanic", race)) {
+      return("White and Hispanic or Latino")
+    } else if (grepl("asian", race)) {
+      return("White and Asian")
+    } else if (grepl("native hawaiian", race) || grepl("pacific islander", race)) {
+      return("White and Native Hawaiian or Other Pacific Islander")
+    } else if (grepl("american indian", race)) {
+      return("White and American Indian or Alaska Native")
+    } else {
+      return("White")
+    }
+  } else if (grepl("black", race)) {
+    if (grepl("hispanic", race)) {
+      return("Black or African American and Hispanic or Latino")
+    } else if (grepl("asian", race)) {
+      return("Black or African American and Asian")
+    } else if (grepl("native hawaiian", race) || grepl("pacific islander", race)) {
+      return("Black or African American and Native Hawaiian or Other Pacific Islander")
+    } else if (grepl("american indian", race)) {
+      return("Black or African American and American Indian or Alaska Native")
+    } else {
+      return("Black or African American")
+    }
+  } else if (grepl("hispanic", race)) {
+    if (grepl("asian", race)) {
+      return("Hispanic or Latino and Asian")
+    } else if (grepl("native hawaiian", race) || grepl("pacific islander", race)) {
+      return("Hispanic or Latino and Native Hawaiian or Other Pacific Islander")
+    } else if (grepl("american indian", race)) {
+      return("Hispanic or Latino and American Indian or Alaska Native")
+    } else {
+      return("Hispanic or Latino")
+    }
+  } else if (grepl("asian", race)) {
+    if (grepl("native hawaiian", race) || grepl("pacific islander", race)) {
+      return("Asian and Native Hawaiian or Other Pacific Islander")
+    } else if (grepl("american indian", race)) {
+      return("Asian and American Indian or Alaska Native")
+    } else {
+      return("Asian")
+    }
+  } else if (grepl("native hawaiian", race) || grepl("pacific islander", race)) {
+    if (grepl("american indian", race)) {
+      return("Native Hawaiian or Other Pacific Islander and American Indian or Alaska Native")
+    } else {
+      return("Native Hawaiian or Other Pacific Islander")
+    }
+  } else if (grepl("american indian", race)) {
+    return("American Indian or Alaska Native")
+  } else if (grepl("not recorded", race) || grepl("not applicable", race)) {
+    return("Not Recorded/Applicable")
+  } else {
+    return("Other")
+  }
+}
+
+# Apply the cleaning function to the race data
+combined_data <- combined_data %>%
+  mutate(
+    Cleaned_Race = sapply(`Patient Race LIST (ePatient.14)`, clean_race_categories)
+  )
+```
+
+```{r}
+# Summarize by cleaned race categories
+race_summary_cleaned <- combined_data %>%
+  group_by(Cleaned_Race) %>%
+  filter(`Cardiac Arrest During EMS Event (eArrest.01)` %in% c(
+    "Yes, Prior to Any EMS Arrival\r\n(includes Transport EMS &\r\nMedical First Responders)",
+    "Yes, After Any EMS Arrival\r\n(includes Transport EMS &\r\nMedical First Responders)"
+  )) %>%
+  summarise(
+    count = n()
+  ) %>%
+  arrange(desc(count))
+
+# Print the cleaned race/ethnicity summary
+print(race_summary_cleaned)
+```
+# What care is provided?
+```{r}
+# Summarize types of interventions provided
+# View unique values for 'Cardiac Arrest During EMS Event (eArrest.01)' to confirm the expected values
+unique(combined_data$'Cardiac Arrest During EMS Event (eArrest.01)')
+unique(combined_data$'Cardiac Arrest Etiology (eArrest.02)')
+unique(combined_data$'Resuscitation Attempted by EMS LIST (eArrest.03)')
+```
+
+```{r}
+# Summarize types of interventions provided
+interventions_summary <- combined_data %>%
+  # Filter to include only rows where cardiac arrest occurred during the EMS event
+  filter(`Cardiac Arrest During EMS Event (eArrest.01)` %in% c(
+    "Yes, Prior to Any EMS Arrival\r\n(includes Transport EMS &\r\nMedical First Responders)",
+    "Yes, After Any EMS Arrival\r\n(includes Transport EMS &\r\nMedical First Responders)"
+  )) %>%
+  summarise(
+    total_cases = n(),  # Total number of cardiac arrest cases during EMS event
+    cpr_provided = sum(`Resuscitation Attempted by EMS LIST (eArrest.03)` %in% c("Attempted Defibrillation,\r\nInitiated Chest Compressions,\r\nAttempted Ventilation",
+                                                                                 "Attempted Defibrillation,\r\nAttempted Ventilation, Initiated\r\nChest Compressions",
+                                                                                 "Initiated Chest Compressions,\r\nAttempted Ventilation",
+                                                                                 "Initiated Chest Compressions"), na.rm = TRUE),
+    defibrillator_used = sum(`Resuscitation Attempted by EMS LIST (eArrest.03)` %in% c("Attempted Defibrillation,\r\nInitiated Chest Compressions,\r\nAttempted Ventilation",
+                                                                                       "Attempted Defibrillation,\r\nAttempted Ventilation, Initiated\r\nChest Compressions"), na.rm = TRUE),
+    not_attempted = sum(`Resuscitation Attempted by EMS LIST (eArrest.03)` %in% c("Not Attempted-Considered\r\nFutile", "Not Attempted-DNR Orders"), na.rm = TRUE),
+    other = sum(`Resuscitation Attempted by EMS LIST (eArrest.03)` %in% c("Not Applicable", "Not Recorded"), na.rm = TRUE)
+  )
+
+# Print summary of interventions
+print(interventions_summary)
+
+# Prepare data for visualization
+interventions_data <- tibble(
+  Intervention = c("CPR Provided", "Defibrillator Used", "Not Attempted", "Other"),
+  Count = c(interventions_summary$cpr_provided, interventions_summary$defibrillator_used, interventions_summary$not_attempted, interventions_summary$other)
+)
+
+# Reorder the Intervention factor based on the Count values
+interventions_data <- interventions_data %>%
+  mutate(Intervention = reorder(Intervention, -Count))  # Reorder by descending count
+
+# Visualize the summary of care provided
+ggplot(interventions_data, aes(x = Intervention, y = Count, fill = Intervention)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Summary of Interventions for Cardiac Arrest Cases (n=33)", x = "Intervention Type", y = "Count") +
+  theme_minimal() +
+  scale_fill_manual(values = c("gray", "darkorange", "lightblue", "steelblue"))  # Customize colors
+```
+
+# Opportunities for Improvement
+## Response Times
+```{r}
+# Convert the date-time columns to POSIXct if they are not already in that format
+combined_data <- combined_data %>%
+  mutate(
+    `Unit Notified by Dispatch Date Time (eTimes.03)` = as.POSIXct(`Unit Notified by Dispatch Date Time (eTimes.03)`, format = "%Y-%m-%d %H:%M:%S"),
+    `Unit Arrived on Scene Date Time (eTimes.06)` = as.POSIXct(`Unit Arrived on Scene Date Time (eTimes.06)`, format = "%Y-%m-%d %H:%M:%S"),
+    `Unit Left Scene Date Time (eTimes.09)` = as.POSIXct(`Unit Left Scene Date Time (eTimes.09)`, format = "%Y-%m-%d %H:%M:%S"),
+    `Unit Back in Service Date Time (eTimes.12` = as.POSIXct(`Unit Back in Service Date Time (eTimes.12`, format = "%Y-%m-%d %H:%M:%S")
+  )
+
+# Filter out negative and unrealistic response times
+combined_data_clean <- combined_data %>%
+  mutate(
+    response_time = as.numeric(difftime(`Unit Arrived on Scene Date Time (eTimes.06)`, `Unit Notified by Dispatch Date Time (eTimes.03)`, units = "mins")),
+    on_scene_time = as.numeric(difftime(`Unit Left Scene Date Time (eTimes.09)`, `Unit Arrived on Scene Date Time (eTimes.06)`, units = "mins")),
+    back_in_service_time = as.numeric(difftime(`Unit Back in Service Date Time (eTimes.12`, `Unit Left Scene Date Time (eTimes.09)`, units = "mins"))
+  ) %>%
+  # Filter out rows with negative times or times greater than a realistic threshold (e.g., 24 hours for response time)
+  filter(
+    response_time >= 0 & response_time <= 1440,  # Assuming response times should be within 0 to 24 hours
+    on_scene_time >= 0 & on_scene_time <= 1440,  # Assuming on-scene times should be within 0 to 24 hours
+    back_in_service_time >= 0 & back_in_service_time <= 1440  # Assuming back-in-service times should be within 0 to 24 hours
+  )
+
+# Check the summary of cleaned data
+summary(combined_data_clean[c("response_time", "on_scene_time", "back_in_service_time")])
+
+# Recalculate summary statistics for response times
+response_time_summary_clean <- combined_data_clean %>%
+  filter(`Cardiac Arrest During EMS Event (eArrest.01)` %in% c(
+    "Yes, Prior to Any EMS Arrival\r\n(includes Transport EMS &\r\nMedical First Responders)",
+    "Yes, After Any EMS Arrival\r\n(includes Transport EMS &\r\nMedical First Responders)"
+  )) %>%
+  summarise(
+    count = n(),
+    average_response_time = mean(response_time, na.rm = TRUE),
+    median_response_time = median(response_time, na.rm = TRUE),
+    min_response_time = min(response_time, na.rm = TRUE),
+    max_response_time = max(response_time, na.rm = TRUE)
+  )
+
+# Print cleaned summary statistics for response times
+print(response_time_summary_clean)
+
+# Filter the data for cardiac arrest events
+filtered_data <- combined_data_clean %>%
+  filter(`Cardiac Arrest During EMS Event (eArrest.01)` %in% c(
+    "Yes, Prior to Any EMS Arrival\r\n(includes Transport EMS &\r\nMedical First Responders)",
+    "Yes, After Any EMS Arrival\r\n(includes Transport EMS &\r\nMedical First Responders)"
+  ))
+
+# Plot the response times for filtered data with x-axis limited to 200 minutes
+ggplot(filtered_data, aes(x = response_time)) +
+  geom_histogram(bins = 30, fill = "blue", alpha = 0.7) +
+  labs(
+    title = "Distribution of Response Times for Cardiac Arrest Events (n=9)",
+    x = "Response Time (Minutes)",
+    y = "Frequency"
+  ) +
+  xlim(0, 20) +  # Limit the x-axis to a maximum of 20
+  theme_minimal()
+```
+
+
+# Data Quality Concerns and Limitations
+## Data Completeness and Identifying Missing Data
+```{r}
+# Checking data completeness and identifying missing data
+missing_data_summary <- sapply(combined_data, function(x) sum(is.na(x)))
+print(missing_data_summary)
+
+# Identify columns with more than a certain percentage of missing values
+missing_data_percentage <- sapply(combined_data, function(x) mean(is.na(x))) * 100
+columns_with_high_missing_data <- names(missing_data_percentage[missing_data_percentage > 20])  # Arbitrary 20% threshold
+print(columns_with_high_missing_data)
+```
+
+## Identifying potential biases
+```{r}
+# Check if certain types of cardiac arrest etiologies are reported more frequently
+bias_check_etiology <- combined_data %>%
+  filter(`Cardiac Arrest During EMS Event (eArrest.01)` %in% c(
+    "Yes, Prior to Any EMS Arrival\r\n(includes Transport EMS &\r\nMedical First Responders)",
+    "Yes, After Any EMS Arrival\r\n(includes Transport EMS &\r\nMedical First Responders)"
+  )) %>%
+  group_by(`Cardiac Arrest Etiology (eArrest.02)`) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count))
+
+# Print summary to check for potential biases in etiology reporting
+print(bias_check_etiology)
+
+# Check if resuscitation is attempted more frequently under specific conditions
+bias_check_resuscitation <- combined_data %>%
+  filter(`Cardiac Arrest During EMS Event (eArrest.01)` %in% c(
+    "Yes, Prior to Any EMS Arrival\r\n(includes Transport EMS &\r\nMedical First Responders)",
+    "Yes, After Any EMS Arrival\r\n(includes Transport EMS &\r\nMedical First Responders)"
+  )) %>%
+  group_by(`Resuscitation Attempted by EMS LIST (eArrest.03)`) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count))
+
+# Print summary to check for potential biases in resuscitation attempts
+print(bias_check_resuscitation)
+```
+
+## Temporal limitations
+```{r}
+combined_data <- combined_data %>%
+  mutate(`Unit Notified by Dispatch Date Time (eTimes.03)` = as.POSIXct(`Unit Notified by Dispatch Date Time (eTimes.03)`, format = "%Y-%m-%d %H:%M:%S"))
+
+# Check if the conversion worked
+str(combined_data$`Unit Notified by Dispatch Date Time (eTimes.03)`)
+
+# Analyze data distribution over time
+# Group by month and count the number of incidents
+combined_data %>%
+  mutate(month = floor_date(`Unit Notified by Dispatch Date Time (eTimes.03)`, "month")) %>%
+  group_by(month) %>%
+  summarise(count = n()) %>%
+  ggplot(aes(x = month, y = count)) +
+  geom_line() +
+  labs(title = "Incidents Over Time", x = "Month", y = "Number of Incidents") +
+  theme_minimal()
+```
